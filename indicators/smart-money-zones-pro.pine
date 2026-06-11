@@ -1,0 +1,538 @@
+//@version=5
+indicator("Smart Money Zones PRO", overlay=true, max_boxes_count=20, max_lines_count=30, max_labels_count=30)
+
+volMult       = input.float(1.5,  "Vol Multiplier", minval=1.2, step=0.1)
+leftBars      = input.int(5,      "Pivot Left Bars", minval=3)
+rightBars     = input.int(5,      "Pivot Right Bars", minval=3)
+obSearchBars  = input.int(5,      "OB Candle Search Bars", minval=1, maxval=15)
+mergeGap      = input.float(30.0, "Merge Gap (pips)", minval=5.0)
+maxZonePips   = input.float(25.0, "Max Zone Size After Merge (pips)", minval=5.0)
+majorCloseGap = input.float(35.0, "Skip Lower Sell If Major Above (pips)", minval=10.0)
+maxTaps       = input.int(3,      "Max Taps Before Dead", minval=2, maxval=6)
+htfTF         = input.timeframe("60", "HTF Timeframe")
+
+useSessionFilter = input.bool(true, "Only London + NY Zones")
+tradeSession     = input.session("0600-2000", "Session")
+sessionTZ        = input.string("Etc/UTC", "Timezone")
+showDashboard    = input.bool(true, "Show Dashboard")
+
+showFVG    = input.bool(true, "Show FVG Zones")
+fvgMinPips = input.float(12.0, "Min FVG Size (pips)", minval=3.0)
+fvgMax     = input.int(2, "Max FVG Zones", minval=1, maxval=5)
+
+showTargets  = input.bool(true, "Show Next Zone Target")
+minTargetRR  = input.float(2.0, "Min RR For Target", minval=1.0, step=0.25)
+showBreaks   = input.bool(false, "Show Breakout / Breakdown")
+breakVolMult = input.float(1.5, "Break Vol Multiplier", minval=1.0, step=0.1)
+
+// ─── BASE ─────────────────────────────────────────────────
+avgVol      = ta.sma(volume, 50)
+pip         = syminfo.mintick * 10
+merge       = mergeGap * pip
+maxZoneSize = maxZonePips * pip
+closeGap    = majorCloseGap * pip
+fvgMin      = fvgMinPips * pip
+
+bodyH = math.max(open, close)
+bodyL = math.min(open, close)
+
+inSession = not useSessionFilter or not na(time(timeframe.period, tradeSession, sessionTZ))
+
+// ─── OB FINDERS ───────────────────────────────────────────
+sellObTop(_r, _lb) =>
+    float top = na
+    bool found = false
+    for j = _r to _r + _lb
+        if not found and close[j] > open[j]
+            top := math.max(open[j], close[j])
+            found := true
+    top
+
+sellObBot(_r, _lb) =>
+    float bot = na
+    bool found = false
+    for j = _r to _r + _lb
+        if not found and close[j] > open[j]
+            bot := math.min(open[j], close[j])
+            found := true
+    bot
+
+buyObTop(_r, _lb) =>
+    float top = na
+    bool found = false
+    for j = _r to _r + _lb
+        if not found and close[j] < open[j]
+            top := math.max(open[j], close[j])
+            found := true
+    top
+
+buyObBot(_r, _lb) =>
+    float bot = na
+    bool found = false
+    for j = _r to _r + _lb
+        if not found and close[j] < open[j]
+            bot := math.min(open[j], close[j])
+            found := true
+    bot
+
+// ─── LABEL HELPERS ────────────────────────────────────────
+gradeName(g, t) =>
+    t >= 2 ? "C" : t == 1 ? g >= 4 ? "A" : g >= 3 ? "B" : "C" : g >= 4 ? "A+" : g >= 3 ? "A" : "B"
+
+zoneState(t) =>
+    t == 0 ? "Fresh" : t == 1 ? "1 Tap" : "Weak"
+
+zoneText(lbl, g, t) =>
+    gradeName(g, t) + " | " + zoneState(t) + "\n" + lbl + "\nTaps: " + str.tostring(t) + "/" + str.tostring(maxTaps)
+
+gradeShort(g) =>
+    g >= 4 ? "A+" : g >= 3 ? "A" : g >= 2 ? "B" : "C"
+
+zonesOverlap(aTop, aBot, bTop, bBot, gap) =>
+    aBot <= bTop + gap and aTop >= bBot - gap
+
+// ─── PIVOTS ───────────────────────────────────────────────
+ph         = ta.pivothigh(high, leftBars, rightBars)
+pl         = ta.pivotlow(low, leftBars, rightBars)
+volAtPivot = volume[rightBars]
+volRatio   = volAtPivot / avgVol
+isValid    = volAtPivot > avgVol * volMult
+ltfGrade   = volRatio >= volMult * 1.8 ? 4 : volRatio >= volMult * 1.25 ? 3 : 2
+
+ltfSellTop = sellObTop(rightBars, obSearchBars)
+ltfSellBot = sellObBot(rightBars, obSearchBars)
+ltfBuyTop  = buyObTop(rightBars, obSearchBars)
+ltfBuyBot  = buyObBot(rightBars, obSearchBars)
+
+// ─── HTF DATA ─────────────────────────────────────────────
+[htfAvg, htfPH, htfPL, htfVP, htfSellTop, htfSellBot, htfBuyTop, htfBuyBot] = request.security(
+     syminfo.tickerid, htfTF,
+     [ta.sma(volume, 50),
+      ta.pivothigh(high, leftBars, rightBars),
+      ta.pivotlow(low, leftBars, rightBars),
+      volume[rightBars],
+      sellObTop(rightBars, obSearchBars),
+      sellObBot(rightBars, obSearchBars),
+      buyObTop(rightBars, obSearchBars),
+      buyObBot(rightBars, obSearchBars)],
+     lookahead=barmerge.lookahead_off)
+
+htfValid = htfVP > htfAvg * volMult
+htfNew   = ta.change(time(htfTF)) != 0
+htfGrade = htfVP / htfAvg >= volMult * 1.8 ? 4 : 3
+
+// ─── ARRAYS ───────────────────────────────────────────────
+var box[]    sellBoxes  = array.new_box()
+var int[]    sellTaps   = array.new_int()
+var bool[]   sellHTF    = array.new_bool()
+var string[] sellLabels = array.new_string()
+var bool[]   sellTouch  = array.new_bool()
+var int[]    sellGrades = array.new_int()
+
+var box[]    buyBoxes   = array.new_box()
+var int[]    buyTaps    = array.new_int()
+var bool[]   buyHTF     = array.new_bool()
+var string[] buyLabels  = array.new_string()
+var bool[]   buyTouch   = array.new_bool()
+var int[]    buyGrades  = array.new_int()
+
+var box[]    fvgBoxes   = array.new_box()
+var bool[]   fvgIsBear  = array.new_bool()
+
+var line  activeTpLine  = na
+var label activeTpLabel = na
+var float activeTpPrice = na
+var bool  activeTpIsSell = false
+
+var float lastSellZoneBot = na
+var float lastBuyZoneTop  = na
+var bool  breakoutAlerted = false
+var bool  breakdownAlerted = false
+
+// ─── TARGET HELPERS ───────────────────────────────────────
+nearestBuyTargetBelow(_price) =>
+    float target = na
+    if array.size(buyBoxes) > 0
+        for k = 0 to array.size(buyBoxes) - 1
+            bb  = array.get(buyBoxes, k)
+            lvl = box.get_top(bb)
+            if lvl < _price and (na(target) or lvl > target)
+                target := lvl
+    target
+
+nearestSellTargetAbove(_price) =>
+    float target = na
+    if array.size(sellBoxes) > 0
+        for k = 0 to array.size(sellBoxes) - 1
+            sb  = array.get(sellBoxes, k)
+            lvl = box.get_bottom(sb)
+            if lvl > _price and (na(target) or lvl < target)
+                target := lvl
+    target
+
+targetStillActive(_price, _isSell) =>
+    bool active = false
+    if not na(_price)
+        if _isSell and array.size(buyBoxes) > 0
+            for k = 0 to array.size(buyBoxes) - 1
+                bb = array.get(buyBoxes, k)
+                if math.abs(box.get_top(bb) - _price) <= syminfo.mintick * 2
+                    active := true
+        if not _isSell and array.size(sellBoxes) > 0
+            for k = 0 to array.size(sellBoxes) - 1
+                sb = array.get(sellBoxes, k)
+                if math.abs(box.get_bottom(sb) - _price) <= syminfo.mintick * 2
+                    active := true
+    active
+
+deleteActiveTp() =>
+    if not na(activeTpLine)
+        line.delete(activeTpLine)
+    if not na(activeTpLabel)
+        label.delete(activeTpLabel)
+
+drawTpLine(_price, _isSell) =>
+    col = _isSell ? color.new(color.red, 0) : color.new(color.green, 0)
+    line.new(bar_index, _price, bar_index + 80, _price, color=col, style=line.style_dashed, width=2)
+
+drawTpLabel(_price, _isSell, _rr) =>
+    col = _isSell ? color.new(color.red, 0) : color.new(color.green, 0)
+    txt = _isSell ? "SELL TARGET -> BUY ZONE\nRR: " + str.tostring(_rr, "#.##") : "BUY TARGET -> SELL ZONE\nRR: " + str.tostring(_rr, "#.##")
+    label.new(bar_index + 80, _price, txt, style=label.style_label_left, textcolor=color.white, color=col, size=size.small)
+
+// ─── PROCESS SELL ZONES ───────────────────────────────────
+if array.size(sellBoxes) > 0
+    for i = array.size(sellBoxes) - 1 to 0
+        b         = array.get(sellBoxes, i)
+        zTop      = box.get_top(b)
+        zBot      = box.get_bottom(b)
+        taps      = array.get(sellTaps, i)
+        isH       = array.get(sellHTF, i)
+        baseGrade = array.get(sellGrades, i)
+
+        if showBreaks and bodyH > zTop and volume > avgVol * breakVolMult and not breakoutAlerted
+            label.new(bar_index, zTop, "BREAKOUT", style=label.style_label_up, color=color.new(color.lime, 10), textcolor=color.black, size=size.normal)
+            breakoutAlerted  := true
+            breakdownAlerted := false
+
+        if bodyH > zTop or taps >= maxTaps
+            box.delete(b)
+            array.remove(sellBoxes, i)
+            array.remove(sellTaps, i)
+            array.remove(sellHTF, i)
+            array.remove(sellLabels, i)
+            array.remove(sellTouch, i)
+            array.remove(sellGrades, i)
+        else
+            touching = high >= zBot and low <= zTop
+            wasTouch = array.get(sellTouch, i)
+            if touching and not wasTouch
+                newTaps = taps + 1
+                array.set(sellTaps, i, newTaps)
+                array.set(sellTouch, i, true)
+                if newTaps >= maxTaps
+                    box.delete(b)
+                    array.remove(sellBoxes, i)
+                    array.remove(sellTaps, i)
+                    array.remove(sellHTF, i)
+                    array.remove(sellLabels, i)
+                    array.remove(sellTouch, i)
+                    array.remove(sellGrades, i)
+                else
+                    a   = math.max(35, 75 - newTaps * 12)
+                    col = isH ? color.new(color.maroon, a) : color.new(color.red, a)
+                    box.set_bgcolor(b, col)
+                    box.set_text(b, zoneText(array.get(sellLabels, i), baseGrade, newTaps))
+                    box.set_right(b, bar_index + 300)
+
+                    tp = nearestBuyTargetBelow(zBot)
+                    risk = zTop - zBot
+                    reward = not na(tp) ? zBot - tp : na
+                    rr = risk > 0 and not na(reward) ? reward / risk : na
+
+                    if showTargets and not na(tp) and not na(rr) and rr >= minTargetRR
+                        deleteActiveTp()
+                        activeTpPrice   := tp
+                        activeTpIsSell  := true
+                        activeTpLine    := drawTpLine(tp, true)
+                        activeTpLabel   := drawTpLabel(tp, true, rr)
+            else
+                array.set(sellTouch, i, touching)
+                box.set_right(b, bar_index + 300)
+
+        if array.size(sellBoxes) > 0
+            lastSellZoneBot := box.get_bottom(array.get(sellBoxes, 0))
+
+// ─── PROCESS BUY ZONES ────────────────────────────────────
+if array.size(buyBoxes) > 0
+    for i = array.size(buyBoxes) - 1 to 0
+        b         = array.get(buyBoxes, i)
+        zTop      = box.get_top(b)
+        zBot      = box.get_bottom(b)
+        taps      = array.get(buyTaps, i)
+        isH       = array.get(buyHTF, i)
+        baseGrade = array.get(buyGrades, i)
+
+        if showBreaks and bodyL < zBot and volume > avgVol * breakVolMult and not breakdownAlerted
+            label.new(bar_index, zBot, "BREAKDOWN", style=label.style_label_down, color=color.new(color.red, 10), textcolor=color.white, size=size.normal)
+            breakdownAlerted := true
+            breakoutAlerted  := false
+
+        if bodyL < zBot or taps >= maxTaps
+            box.delete(b)
+            array.remove(buyBoxes, i)
+            array.remove(buyTaps, i)
+            array.remove(buyHTF, i)
+            array.remove(buyLabels, i)
+            array.remove(buyTouch, i)
+            array.remove(buyGrades, i)
+        else
+            touching = low <= zTop and high >= zBot
+            wasTouch = array.get(buyTouch, i)
+            if touching and not wasTouch
+                newTaps = taps + 1
+                array.set(buyTaps, i, newTaps)
+                array.set(buyTouch, i, true)
+                if newTaps >= maxTaps
+                    box.delete(b)
+                    array.remove(buyBoxes, i)
+                    array.remove(buyTaps, i)
+                    array.remove(buyHTF, i)
+                    array.remove(buyLabels, i)
+                    array.remove(buyTouch, i)
+                    array.remove(buyGrades, i)
+                else
+                    a   = math.max(35, 75 - newTaps * 12)
+                    col = isH ? color.new(color.green, a) : color.new(color.blue, a)
+                    box.set_bgcolor(b, col)
+                    box.set_text(b, zoneText(array.get(buyLabels, i), baseGrade, newTaps))
+                    box.set_right(b, bar_index + 300)
+
+                    tp = nearestSellTargetAbove(zTop)
+                    risk = zTop - zBot
+                    reward = not na(tp) ? tp - zTop : na
+                    rr = risk > 0 and not na(reward) ? reward / risk : na
+
+                    if showTargets and not na(tp) and not na(rr) and rr >= minTargetRR
+                        deleteActiveTp()
+                        activeTpPrice   := tp
+                        activeTpIsSell  := false
+                        activeTpLine    := drawTpLine(tp, false)
+                        activeTpLabel   := drawTpLabel(tp, false, rr)
+            else
+                array.set(buyTouch, i, touching)
+                box.set_right(b, bar_index + 300)
+
+        if array.size(buyBoxes) > 0
+            lastBuyZoneTop := box.get_top(array.get(buyBoxes, array.size(buyBoxes) - 1))
+
+// ─── PROCESS FVG ZONES ────────────────────────────────────
+if array.size(fvgBoxes) > 0
+    for i = array.size(fvgBoxes) - 1 to 0
+        b      = array.get(fvgBoxes, i)
+        zTop   = box.get_top(b)
+        zBot   = box.get_bottom(b)
+        isBear = array.get(fvgIsBear, i)
+        filled = isBear ? bodyH > zTop : bodyL < zBot
+        if filled
+            box.delete(b)
+            array.remove(fvgBoxes, i)
+            array.remove(fvgIsBear, i)
+        else
+            box.set_right(b, bar_index + 300)
+
+// ─── TARGET LINE MANAGEMENT ───────────────────────────────
+if not na(activeTpPrice)
+    if not targetStillActive(activeTpPrice, activeTpIsSell)
+        deleteActiveTp()
+        activeTpLine  := na
+        activeTpLabel := na
+        activeTpPrice := na
+    else
+        if not na(activeTpLine)
+            line.set_x2(activeTpLine, bar_index + 80)
+        if not na(activeTpLabel)
+            label.set_x(activeTpLabel, bar_index + 80)
+
+// Reset break alerts when price returns inside zones
+if breakoutAlerted and not na(lastSellZoneBot) and close < lastSellZoneBot
+    breakoutAlerted := false
+if breakdownAlerted and not na(lastBuyZoneTop) and close > lastBuyZoneTop
+    breakdownAlerted := false
+
+// ─── ADD SELL ZONE ────────────────────────────────────────
+addNewSellZone(obTop, obBot, lbl, isH, baseGrade) =>
+    merged    = false
+    skipLower = false
+    if array.size(sellBoxes) > 0
+        for i = 0 to array.size(sellBoxes) - 1
+            b        = array.get(sellBoxes, i)
+            zTop     = box.get_top(b)
+            zBot     = box.get_bottom(b)
+            oldGrade = array.get(sellGrades, i)
+
+            newTop   = math.max(zTop, obTop)
+            newBot   = math.min(zBot, obBot)
+            canMerge = zonesOverlap(obTop, obBot, zTop, zBot, merge) and newTop - newBot <= maxZoneSize
+
+            if canMerge
+                newGrade = math.max(oldGrade, baseGrade)
+                newLbl   = isH or array.get(sellHTF, i) ? "HTF MERGED SELL" : "MERGED SELL"
+                box.set_top(b, newTop)
+                box.set_bottom(b, newBot)
+                box.set_text(b, zoneText(newLbl, newGrade, array.get(sellTaps, i)))
+                array.set(sellLabels, i, newLbl)
+                array.set(sellHTF, i, array.get(sellHTF, i) or isH)
+                array.set(sellGrades, i, newGrade)
+                merged := true
+                break
+
+            if not isH and oldGrade >= 4 and zBot > obTop and zBot - obTop <= closeGap
+                skipLower := true
+
+    if not merged and not skipLower
+        col = isH ? color.new(color.maroon, 55) : color.new(color.red, 70)
+        b   = box.new(bar_index - rightBars, obTop, bar_index + 300, obBot,
+               bgcolor=col, border_color=color.new(color.red, 15),
+               text=zoneText(lbl, baseGrade, 0),
+               text_color=color.white, text_size=size.small)
+        array.push(sellBoxes, b)
+        array.push(sellTaps, 0)
+        array.push(sellHTF, isH)
+        array.push(sellLabels, lbl)
+        array.push(sellTouch, false)
+        array.push(sellGrades, baseGrade)
+        if array.size(sellBoxes) > 3
+            box.delete(array.shift(sellBoxes))
+            array.shift(sellTaps)
+            array.shift(sellHTF)
+            array.shift(sellLabels)
+            array.shift(sellTouch)
+            array.shift(sellGrades)
+
+// ─── ADD BUY ZONE ─────────────────────────────────────────
+addNewBuyZone(obTop, obBot, lbl, isH, baseGrade) =>
+    merged = false
+    if array.size(buyBoxes) > 0
+        for i = 0 to array.size(buyBoxes) - 1
+            b        = array.get(buyBoxes, i)
+            zTop     = box.get_top(b)
+            zBot     = box.get_bottom(b)
+            oldGrade = array.get(buyGrades, i)
+
+            newTop   = math.max(zTop, obTop)
+            newBot   = math.min(zBot, obBot)
+            canMerge = zonesOverlap(obTop, obBot, zTop, zBot, merge) and newTop - newBot <= maxZoneSize
+
+            if canMerge
+                newGrade = math.max(oldGrade, baseGrade)
+                newLbl   = isH or array.get(buyHTF, i) ? "HTF MERGED BUY" : "MERGED BUY"
+                box.set_top(b, newTop)
+                box.set_bottom(b, newBot)
+                box.set_text(b, zoneText(newLbl, newGrade, array.get(buyTaps, i)))
+                array.set(buyLabels, i, newLbl)
+                array.set(buyHTF, i, array.get(buyHTF, i) or isH)
+                array.set(buyGrades, i, newGrade)
+                merged := true
+                break
+
+    if not merged
+        col = isH ? color.new(color.green, 55) : color.new(color.blue, 70)
+        b   = box.new(bar_index - rightBars, obTop, bar_index + 300, obBot,
+               bgcolor=col, border_color=color.new(color.blue, 15),
+               text=zoneText(lbl, baseGrade, 0),
+               text_color=color.white, text_size=size.small)
+        array.push(buyBoxes, b)
+        array.push(buyTaps, 0)
+        array.push(buyHTF, isH)
+        array.push(buyLabels, lbl)
+        array.push(buyTouch, false)
+        array.push(buyGrades, baseGrade)
+        if array.size(buyBoxes) > 3
+            box.delete(array.shift(buyBoxes))
+            array.shift(buyTaps)
+            array.shift(buyHTF)
+            array.shift(buyLabels)
+            array.shift(buyTouch)
+            array.shift(buyGrades)
+
+// ─── FVG DETECTION ────────────────────────────────────────
+if showFVG and inSession
+    bearGap = low[2] - high
+    if bearGap >= fvgMin
+        b = box.new(bar_index - 2, low[2], bar_index + 300, high,
+             bgcolor=color.new(color.orange, 82),
+             border_color=color.new(color.orange, 40),
+             text="FVG SELL", text_color=color.orange, text_size=size.tiny)
+        array.push(fvgBoxes, b)
+        array.push(fvgIsBear, true)
+        if array.size(fvgBoxes) > fvgMax
+            box.delete(array.shift(fvgBoxes))
+            array.shift(fvgIsBear)
+
+    bullGap = low - high[2]
+    if bullGap >= fvgMin
+        b = box.new(bar_index - 2, low, bar_index + 300, high[2],
+             bgcolor=color.new(color.yellow, 85),
+             border_color=color.new(color.yellow, 40),
+             text="FVG BUY", text_color=color.yellow, text_size=size.tiny)
+        array.push(fvgBoxes, b)
+        array.push(fvgIsBear, false)
+        if array.size(fvgBoxes) > fvgMax
+            box.delete(array.shift(fvgBoxes))
+            array.shift(fvgIsBear)
+
+// ─── TRIGGERS ─────────────────────────────────────────────
+if inSession and not na(ph) and isValid and not na(ltfSellTop) and not na(ltfSellBot)
+    addNewSellZone(ltfSellTop, ltfSellBot, "SELL OB | " + str.tostring(math.round(volAtPivot/1000)) + "k", false, ltfGrade)
+
+if inSession and not na(pl) and isValid and not na(ltfBuyTop) and not na(ltfBuyBot)
+    addNewBuyZone(ltfBuyTop, ltfBuyBot, "BUY OB | " + str.tostring(math.round(volAtPivot/1000)) + "k", false, ltfGrade)
+
+if inSession and htfNew and not na(htfPH) and htfValid and not na(htfSellTop) and not na(htfSellBot)
+    addNewSellZone(htfSellTop, htfSellBot, "HTF SELL | " + str.tostring(math.round(htfVP/1000)) + "k", true, htfGrade)
+
+if inSession and htfNew and not na(htfPL) and htfValid and not na(htfBuyTop) and not na(htfBuyBot)
+    addNewBuyZone(htfBuyTop, htfBuyBot, "HTF BUY | " + str.tostring(math.round(htfVP/1000)) + "k", true, htfGrade)
+
+// ─── DASHBOARD ────────────────────────────────────────────
+bestBuyGrade  = array.size(buyGrades)  > 0 ? array.max(buyGrades)  : 0
+bestSellGrade = array.size(sellGrades) > 0 ? array.max(sellGrades) : 0
+fvgCount      = array.size(fvgBoxes)
+
+buySweepActive  = false
+sellSweepActive = false
+if array.size(buyBoxes) > 0
+    buySweepActive  := low <= box.get_top(array.get(buyBoxes, array.size(buyBoxes) - 1))
+if array.size(sellBoxes) > 0
+    sellSweepActive := high >= box.get_bottom(array.get(sellBoxes, array.size(sellBoxes) - 1))
+
+breakStatus = breakoutAlerted ? "BREAKOUT" : breakdownAlerted ? "BREAKDOWN" : "None"
+
+var table dash = table.new(position.top_right, 2, 7, border_width=1)
+
+if showDashboard and barstate.islast
+    table.cell(dash, 0, 0, "SMZ PRO", text_color=color.white, bgcolor=color.black)
+    table.cell(dash, 1, 0, "Clean Zones", text_color=color.white, bgcolor=color.black)
+
+    table.cell(dash, 0, 1, "Best Buy", text_color=color.white, bgcolor=color.gray)
+    table.cell(dash, 1, 1, gradeShort(bestBuyGrade), text_color=color.white, bgcolor=color.gray)
+
+    table.cell(dash, 0, 2, "Best Sell", text_color=color.white, bgcolor=color.gray)
+    table.cell(dash, 1, 2, gradeShort(bestSellGrade), text_color=color.white, bgcolor=color.gray)
+
+    table.cell(dash, 0, 3, "Buy / Sell", text_color=color.white, bgcolor=color.gray)
+    table.cell(dash, 1, 3, str.tostring(array.size(buyBoxes)) + " / " + str.tostring(array.size(sellBoxes)), text_color=color.white, bgcolor=color.gray)
+
+    table.cell(dash, 0, 4, "FVG Active", text_color=color.white, bgcolor=color.gray)
+    table.cell(dash, 1, 4, str.tostring(fvgCount), text_color=color.white, bgcolor=color.gray)
+
+    table.cell(dash, 0, 5, "Sweep Active", text_color=color.white, bgcolor=color.gray)
+    table.cell(dash, 1, 5, buySweepActive or sellSweepActive ? "Yes" : "No", text_color=color.white, bgcolor=color.gray)
+
+    table.cell(dash, 0, 6, "Break Status", text_color=color.white, bgcolor=color.black)
+    brkCol = breakoutAlerted ? color.new(color.lime, 20) : breakdownAlerted ? color.new(color.red, 20) : color.gray
+    table.cell(dash, 1, 6, breakStatus, text_color=color.white, bgcolor=brkCol)
+
+if not showDashboard and barstate.islast
+    table.clear(dash, 0, 0, 1, 6)
