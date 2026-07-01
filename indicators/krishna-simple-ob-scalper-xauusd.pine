@@ -1,0 +1,220 @@
+//@version=5
+indicator("Krishna Simple OB Scalper - XAUUSD", overlay=true, max_boxes_count=50, max_labels_count=50)
+
+// ============================================================
+// INPUTS
+// ============================================================
+atrLen = input.int(14, "ATR Length", minval=5, group="Displacement Filter")
+dispMult = input.float(1.2, "Displacement Candle = ATR x", minval=0.5, step=0.1, group="Displacement Filter")
+volAvgLen = input.int(20, "Volume Average Length", minval=5, group="Displacement Filter")
+volMult = input.float(1.2, "Displacement Volume = Avg x", minval=0.5, step=0.1, group="Displacement Filter")
+
+maxZonesPerSide = input.int(3, "Max Active Zones Per Side", minval=1, maxval=6, group="Zone Rules")
+zoneExtendBars = input.int(150, "Zone Box Extend (bars)", minval=20, group="Zone Rules")
+
+fvgMinPips = input.float(5.0, "Min FVG Size For Confirmation (pips)", minval=1.0, group="Zone Strength")
+strongDispMult = input.float(1.5, "Strong Displacement Tier = ATR x", minval=1.0, step=0.1, group="Zone Strength")
+
+showDash = input.bool(true, "Show Dashboard", group="Display")
+
+// ============================================================
+// CALCS
+// ============================================================
+pip = syminfo.mintick * 10
+fvgMin = fvgMinPips * pip
+atrVal = ta.atr(atrLen)
+volAvg = ta.sma(volume, volAvgLen)
+
+bodyH = math.max(open, close)
+bodyL = math.min(open, close)
+
+dispRange = high - low
+dispUp = close > open and dispRange >= atrVal * dispMult and volume > volAvg * volMult
+dispDown = close < open and dispRange >= atrVal * dispMult and volume > volAvg * volMult
+
+// ============================================================
+// OB FINDER: last opposite-color candle immediately before displacement
+// ============================================================
+bullObTop = dispUp and close[1] < open[1] ? math.max(open[1], close[1]) : na
+bullObBot = dispUp and close[1] < open[1] ? math.min(open[1], close[1]) : na
+
+bearObTop = dispDown and close[1] > open[1] ? math.max(open[1], close[1]) : na
+bearObBot = dispDown and close[1] > open[1] ? math.min(open[1], close[1]) : na
+
+// ============================================================
+// ZONE STRENGTH SCORING: all factors intrinsic to this candle pair
+// ============================================================
+obCandleRange = high[1] - low[1]
+obCandleBody = math.abs(close[1] - open[1])
+cleanOB = obCandleRange > 0 and (obCandleBody / obCandleRange) >= 0.4
+
+bullFvgGap = low - high[2]
+bearFvgGap = low[2] - high
+hasFvgUp = bullFvgGap >= fvgMin
+hasFvgDown = bearFvgGap >= fvgMin
+
+obLowVol = volume[1] < volAvg
+strongDisp = dispRange >= atrVal * strongDispMult
+
+scoreBuyZone() =>
+    s = 0
+    s += cleanOB ? 1 : 0
+    s += hasFvgUp ? 1 : 0
+    s += obLowVol ? 1 : 0
+    s += strongDisp ? 1 : 0
+    s
+
+scoreSellZone() =>
+    s = 0
+    s += cleanOB ? 1 : 0
+    s += hasFvgDown ? 1 : 0
+    s += obLowVol ? 1 : 0
+    s += strongDisp ? 1 : 0
+    s
+
+starsText(s) =>
+    s >= 4 ? "**** STRONG" : s == 3 ? "*** Good" : s == 2 ? "** Fair" : "* Weak"
+
+// ============================================================
+// STATE: ZONE ARRAYS
+// ============================================================
+var box[] buyBoxes = array.new_box()
+var bool[] buyInZone = array.new_bool()
+var int[] buyScores = array.new_int()
+var int[] buyTouches = array.new_int()
+
+var box[] sellBoxes = array.new_box()
+var bool[] sellInZone = array.new_bool()
+var int[] sellScores = array.new_int()
+var int[] sellTouches = array.new_int()
+
+zoneLabel(side, inZone, score, touches) =>
+    tag = inZone ? "ENTRY OK" : "WAIT - NO TAP"
+    touchTag = touches > 0 ? "\nTouch #" + str.tostring(touches) : ""
+    side + " ZONE\n" + starsText(score) + "\n" + tag + touchTag
+
+// ============================================================
+// PROCESS EXISTING BUY DEMAND ZONES
+// ============================================================
+if array.size(buyBoxes) > 0
+    for i = array.size(buyBoxes) - 1 to 0
+        b = array.get(buyBoxes, i)
+        zTop = box.get_top(b)
+        zBot = box.get_bottom(b)
+        sc = array.get(buyScores, i)
+        tc = array.get(buyTouches, i)
+
+        if bodyL < zBot
+            box.delete(b)
+            array.remove(buyBoxes, i)
+            array.remove(buyInZone, i)
+            array.remove(buyScores, i)
+            array.remove(buyTouches, i)
+        else
+            wasInZone = array.get(buyInZone, i)
+            inZoneNow = low <= zTop and high >= zBot
+
+            if inZoneNow and not wasInZone
+                tc := tc + 1
+                array.set(buyTouches, i, tc)
+
+            array.set(buyInZone, i, inZoneNow)
+            box.set_right(b, bar_index + zoneExtendBars)
+            box.set_bgcolor(b, inZoneNow ? color.new(color.lime, 30) : color.new(color.blue, 70))
+            box.set_text(b, zoneLabel("BUY", inZoneNow, sc, tc))
+
+// ============================================================
+// PROCESS EXISTING SELL SUPPLY ZONES
+// ============================================================
+if array.size(sellBoxes) > 0
+    for i = array.size(sellBoxes) - 1 to 0
+        b = array.get(sellBoxes, i)
+        zTop = box.get_top(b)
+        zBot = box.get_bottom(b)
+        sc = array.get(sellScores, i)
+        tc = array.get(sellTouches, i)
+
+        if bodyH > zTop
+            box.delete(b)
+            array.remove(sellBoxes, i)
+            array.remove(sellInZone, i)
+            array.remove(sellScores, i)
+            array.remove(sellTouches, i)
+        else
+            wasInZone = array.get(sellInZone, i)
+            inZoneNow = high >= zBot and low <= zTop
+
+            if inZoneNow and not wasInZone
+                tc := tc + 1
+                array.set(sellTouches, i, tc)
+
+            array.set(sellInZone, i, inZoneNow)
+            box.set_right(b, bar_index + zoneExtendBars)
+            box.set_bgcolor(b, inZoneNow ? color.new(color.orange, 30) : color.new(color.red, 70))
+            box.set_text(b, zoneLabel("SELL", inZoneNow, sc, tc))
+
+// ============================================================
+// NEW ZONE CREATION
+// ============================================================
+if not na(bullObTop)
+    sc = scoreBuyZone()
+    b = box.new(bar_index - 2, bullObTop, bar_index + zoneExtendBars, bullObBot, bgcolor=color.new(color.blue, 70), border_color=color.new(color.blue, 10), text=zoneLabel("BUY", false, sc, 0), text_color=color.white, text_size=size.small)
+    array.push(buyBoxes, b)
+    array.push(buyInZone, false)
+    array.push(buyScores, sc)
+    array.push(buyTouches, 0)
+    if array.size(buyBoxes) > maxZonesPerSide
+        box.delete(array.shift(buyBoxes))
+        array.shift(buyInZone)
+        array.shift(buyScores)
+        array.shift(buyTouches)
+
+if not na(bearObTop)
+    sc = scoreSellZone()
+    b = box.new(bar_index - 2, bearObTop, bar_index + zoneExtendBars, bearObBot, bgcolor=color.new(color.red, 70), border_color=color.new(color.red, 10), text=zoneLabel("SELL", false, sc, 0), text_color=color.white, text_size=size.small)
+    array.push(sellBoxes, b)
+    array.push(sellInZone, false)
+    array.push(sellScores, sc)
+    array.push(sellTouches, 0)
+    if array.size(sellBoxes) > maxZonesPerSide
+        box.delete(array.shift(sellBoxes))
+        array.shift(sellInZone)
+        array.shift(sellScores)
+        array.shift(sellTouches)
+
+// ============================================================
+// DASHBOARD
+// ============================================================
+anyBuyInZone = false
+bestBuyScore = 0
+if array.size(buyInZone) > 0
+    for i = 0 to array.size(buyInZone) - 1
+        if array.get(buyInZone, i)
+            anyBuyInZone := true
+            bestBuyScore := math.max(bestBuyScore, array.get(buyScores, i))
+
+anySellInZone = false
+bestSellScore = 0
+if array.size(sellInZone) > 0
+    for i = 0 to array.size(sellInZone) - 1
+        if array.get(sellInZone, i)
+            anySellInZone := true
+            bestSellScore := math.max(bestSellScore, array.get(sellScores, i))
+
+var table dash = table.new(position.top_right, 2, 4, border_width=1)
+
+if showDash and barstate.islast
+    table.cell(dash, 0, 0, "Active Buy Zones", text_color=color.white, bgcolor=color.gray)
+    table.cell(dash, 1, 0, str.tostring(array.size(buyBoxes)), text_color=color.white, bgcolor=color.gray)
+
+    table.cell(dash, 0, 1, "Active Sell Zones", text_color=color.white, bgcolor=color.gray)
+    table.cell(dash, 1, 1, str.tostring(array.size(sellBoxes)), text_color=color.white, bgcolor=color.gray)
+
+    table.cell(dash, 0, 2, "Price In Buy Zone", text_color=color.white, bgcolor=anyBuyInZone ? color.new(color.green, 30) : color.gray)
+    table.cell(dash, 1, 2, anyBuyInZone ? starsText(bestBuyScore) + " - ENTRY OK" : "No", text_color=color.white, bgcolor=anyBuyInZone ? color.new(color.green, 30) : color.gray)
+
+    table.cell(dash, 0, 3, "Price In Sell Zone", text_color=color.white, bgcolor=anySellInZone ? color.new(color.red, 30) : color.gray)
+    table.cell(dash, 1, 3, anySellInZone ? starsText(bestSellScore) + " - ENTRY OK" : "No", text_color=color.white, bgcolor=anySellInZone ? color.new(color.red, 30) : color.gray)
+
+if not showDash and barstate.islast
+    table.clear(dash, 0, 0, 1, 3)
