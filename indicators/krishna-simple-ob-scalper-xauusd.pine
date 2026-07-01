@@ -1,5 +1,5 @@
 //@version=5
-indicator("Krishna Simple OB Scalper - XAUUSD", overlay=true, max_boxes_count=50, max_labels_count=50)
+indicator("Krishna Simple OB Scalper - XAUUSD", overlay=true, max_boxes_count=50, max_labels_count=50, max_lines_count=100)
 
 // ============================================================
 // INPUTS
@@ -12,8 +12,12 @@ volMult = input.float(1.2, "Displacement Volume = Avg x", minval=0.5, step=0.1, 
 maxZonesPerSide = input.int(3, "Max Active Zones Per Side", minval=1, maxval=6, group="Zone Rules")
 zoneExtendBars = input.int(150, "Zone Box Extend (bars)", minval=20, group="Zone Rules")
 
-fvgMinPips = input.float(5.0, "Min FVG Size For Confirmation (pips)", minval=1.0, group="Zone Strength")
-strongDispMult = input.float(1.5, "Strong Displacement Tier = ATR x", minval=1.0, step=0.1, group="Zone Strength")
+minQualityPct = input.int(80, "Minimum OB Quality %", minval=20, maxval=100, step=5, group="OB Quality Filter")
+strongDispMult = input.float(1.5, "Strong Displacement Tier = ATR x", minval=1.0, step=0.1, group="OB Quality Filter")
+maxObAtrMult = input.float(0.8, "Max OB Size = ATR x", minval=0.2, step=0.1, group="OB Quality Filter")
+
+targetRR = input.float(3.0, "Minimum Risk Reward", minval=1.0, step=0.25, group="Risk Reward")
+slBufferPips = input.float(2.0, "SL Buffer (pips)", minval=0.0, step=0.5, group="Risk Reward")
 
 showDash = input.bool(true, "Show Dashboard", group="Display")
 
@@ -21,7 +25,7 @@ showDash = input.bool(true, "Show Dashboard", group="Display")
 // CALCS
 // ============================================================
 pip = syminfo.mintick * 10
-fvgMin = fvgMinPips * pip
+slBuffer = slBufferPips * pip
 atrVal = ta.atr(atrLen)
 volAvg = ta.sma(volume, volAvgLen)
 
@@ -42,38 +46,65 @@ bearObTop = dispDown and close[1] > open[1] ? math.max(open[1], close[1]) : na
 bearObBot = dispDown and close[1] > open[1] ? math.min(open[1], close[1]) : na
 
 // ============================================================
-// ZONE STRENGTH SCORING: all factors intrinsic to this candle pair
+// OB-ONLY QUALITY SCORING: no FVG dependency
 // ============================================================
 obCandleRange = high[1] - low[1]
 obCandleBody = math.abs(close[1] - open[1])
 cleanOB = obCandleRange > 0 and (obCandleBody / obCandleRange) >= 0.4
-
-bullFvgGap = low - high[2]
-bearFvgGap = low[2] - high
-hasFvgUp = bullFvgGap >= fvgMin
-hasFvgDown = bearFvgGap >= fvgMin
-
 obLowVol = volume[1] < volAvg
 strongDisp = dispRange >= atrVal * strongDispMult
+compactOB = obCandleRange > 0 and obCandleRange <= atrVal * maxObAtrMult
+displacementClosesStrong = dispRange > 0 and math.abs(close - open) / dispRange >= 0.55
+obScoreMax = 5
 
 scoreBuyZone() =>
     s = 0
     s += cleanOB ? 1 : 0
-    s += hasFvgUp ? 1 : 0
     s += obLowVol ? 1 : 0
     s += strongDisp ? 1 : 0
+    s += compactOB ? 1 : 0
+    s += displacementClosesStrong ? 1 : 0
     s
 
 scoreSellZone() =>
     s = 0
     s += cleanOB ? 1 : 0
-    s += hasFvgDown ? 1 : 0
     s += obLowVol ? 1 : 0
     s += strongDisp ? 1 : 0
+    s += compactOB ? 1 : 0
+    s += displacementClosesStrong ? 1 : 0
     s
 
-starsText(s) =>
-    s >= 4 ? "**** STRONG" : s == 3 ? "*** Good" : s == 2 ? "** Fair" : "* Weak"
+qualityPct(score) =>
+    math.round(score / obScoreMax * 100)
+
+passesQuality(score) =>
+    qualityPct(score) >= minQualityPct
+
+qualityText(score) =>
+    str.tostring(qualityPct(score)) + "% OB Quality"
+
+planBuyEntry(top, bot) =>
+    (top + bot) / 2
+
+planBuyStop(bot) =>
+    bot - slBuffer
+
+planBuyTarget(top, bot) =>
+    entry = planBuyEntry(top, bot)
+    stop = planBuyStop(bot)
+    entry + math.abs(entry - stop) * targetRR
+
+planSellEntry(top, bot) =>
+    (top + bot) / 2
+
+planSellStop(top) =>
+    top + slBuffer
+
+planSellTarget(top, bot) =>
+    entry = planSellEntry(top, bot)
+    stop = planSellStop(top)
+    entry - math.abs(stop - entry) * targetRR
 
 // ============================================================
 // STATE: ZONE ARRAYS
@@ -82,16 +113,20 @@ var box[] buyBoxes = array.new_box()
 var bool[] buyInZone = array.new_bool()
 var int[] buyScores = array.new_int()
 var int[] buyTouches = array.new_int()
+var line[] buyTargetLines = array.new_line()
+var line[] buyStopLines = array.new_line()
 
 var box[] sellBoxes = array.new_box()
 var bool[] sellInZone = array.new_bool()
 var int[] sellScores = array.new_int()
 var int[] sellTouches = array.new_int()
+var line[] sellTargetLines = array.new_line()
+var line[] sellStopLines = array.new_line()
 
-zoneLabel(side, inZone, score, touches) =>
+zoneLabel(side, inZone, score, touches, rr) =>
     tag = inZone ? "ENTRY OK" : "WAIT - NO TAP"
     touchTag = touches > 0 ? "\nTouch #" + str.tostring(touches) : ""
-    side + " ZONE\n" + starsText(score) + "\n" + tag + touchTag
+    side + " OB ZONE\n" + qualityText(score) + "\nRR 1:" + str.tostring(rr) + "\n" + tag + touchTag
 
 // ============================================================
 // PROCESS EXISTING BUY DEMAND ZONES
@@ -103,13 +138,19 @@ if array.size(buyBoxes) > 0
         zBot = box.get_bottom(b)
         sc = array.get(buyScores, i)
         tc = array.get(buyTouches, i)
+        tpLine = array.get(buyTargetLines, i)
+        slLine = array.get(buyStopLines, i)
 
         if bodyL < zBot
             box.delete(b)
+            line.delete(tpLine)
+            line.delete(slLine)
             array.remove(buyBoxes, i)
             array.remove(buyInZone, i)
             array.remove(buyScores, i)
             array.remove(buyTouches, i)
+            array.remove(buyTargetLines, i)
+            array.remove(buyStopLines, i)
         else
             wasInZone = array.get(buyInZone, i)
             inZoneNow = low <= zTop and high >= zBot
@@ -121,7 +162,9 @@ if array.size(buyBoxes) > 0
             array.set(buyInZone, i, inZoneNow)
             box.set_right(b, bar_index + zoneExtendBars)
             box.set_bgcolor(b, inZoneNow ? color.new(color.lime, 30) : color.new(color.blue, 70))
-            box.set_text(b, zoneLabel("BUY", inZoneNow, sc, tc))
+            box.set_text(b, zoneLabel("BUY", inZoneNow, sc, tc, targetRR))
+            line.set_x2(tpLine, bar_index + zoneExtendBars)
+            line.set_x2(slLine, bar_index + zoneExtendBars)
 
 // ============================================================
 // PROCESS EXISTING SELL SUPPLY ZONES
@@ -133,13 +176,19 @@ if array.size(sellBoxes) > 0
         zBot = box.get_bottom(b)
         sc = array.get(sellScores, i)
         tc = array.get(sellTouches, i)
+        tpLine = array.get(sellTargetLines, i)
+        slLine = array.get(sellStopLines, i)
 
         if bodyH > zTop
             box.delete(b)
+            line.delete(tpLine)
+            line.delete(slLine)
             array.remove(sellBoxes, i)
             array.remove(sellInZone, i)
             array.remove(sellScores, i)
             array.remove(sellTouches, i)
+            array.remove(sellTargetLines, i)
+            array.remove(sellStopLines, i)
         else
             wasInZone = array.get(sellInZone, i)
             inZoneNow = high >= zBot and low <= zTop
@@ -151,36 +200,56 @@ if array.size(sellBoxes) > 0
             array.set(sellInZone, i, inZoneNow)
             box.set_right(b, bar_index + zoneExtendBars)
             box.set_bgcolor(b, inZoneNow ? color.new(color.orange, 30) : color.new(color.red, 70))
-            box.set_text(b, zoneLabel("SELL", inZoneNow, sc, tc))
+            box.set_text(b, zoneLabel("SELL", inZoneNow, sc, tc, targetRR))
+            line.set_x2(tpLine, bar_index + zoneExtendBars)
+            line.set_x2(slLine, bar_index + zoneExtendBars)
 
 // ============================================================
 // NEW ZONE CREATION
 // ============================================================
 if not na(bullObTop)
     sc = scoreBuyZone()
-    b = box.new(bar_index - 2, bullObTop, bar_index + zoneExtendBars, bullObBot, bgcolor=color.new(color.blue, 70), border_color=color.new(color.blue, 10), text=zoneLabel("BUY", false, sc, 0), text_color=color.white, text_size=size.small)
-    array.push(buyBoxes, b)
-    array.push(buyInZone, false)
-    array.push(buyScores, sc)
-    array.push(buyTouches, 0)
-    if array.size(buyBoxes) > maxZonesPerSide
-        box.delete(array.shift(buyBoxes))
-        array.shift(buyInZone)
-        array.shift(buyScores)
-        array.shift(buyTouches)
+    if passesQuality(sc)
+        buyTp = planBuyTarget(bullObTop, bullObBot)
+        buySl = planBuyStop(bullObBot)
+        b = box.new(bar_index - 2, bullObTop, bar_index + zoneExtendBars, bullObBot, bgcolor=color.new(color.blue, 70), border_color=color.new(color.blue, 10), text=zoneLabel("BUY", false, sc, 0, targetRR), text_color=color.white, text_size=size.small)
+        tpLine = line.new(bar_index - 2, buyTp, bar_index + zoneExtendBars, buyTp, color=color.new(color.lime, 0), style=line.style_dashed, width=1)
+        slLine = line.new(bar_index - 2, buySl, bar_index + zoneExtendBars, buySl, color=color.new(color.red, 0), style=line.style_dotted, width=1)
+        array.push(buyBoxes, b)
+        array.push(buyInZone, false)
+        array.push(buyScores, sc)
+        array.push(buyTouches, 0)
+        array.push(buyTargetLines, tpLine)
+        array.push(buyStopLines, slLine)
+        if array.size(buyBoxes) > maxZonesPerSide
+            box.delete(array.shift(buyBoxes))
+            array.shift(buyInZone)
+            array.shift(buyScores)
+            array.shift(buyTouches)
+            line.delete(array.shift(buyTargetLines))
+            line.delete(array.shift(buyStopLines))
 
 if not na(bearObTop)
     sc = scoreSellZone()
-    b = box.new(bar_index - 2, bearObTop, bar_index + zoneExtendBars, bearObBot, bgcolor=color.new(color.red, 70), border_color=color.new(color.red, 10), text=zoneLabel("SELL", false, sc, 0), text_color=color.white, text_size=size.small)
-    array.push(sellBoxes, b)
-    array.push(sellInZone, false)
-    array.push(sellScores, sc)
-    array.push(sellTouches, 0)
-    if array.size(sellBoxes) > maxZonesPerSide
-        box.delete(array.shift(sellBoxes))
-        array.shift(sellInZone)
-        array.shift(sellScores)
-        array.shift(sellTouches)
+    if passesQuality(sc)
+        sellTp = planSellTarget(bearObTop, bearObBot)
+        sellSl = planSellStop(bearObTop)
+        b = box.new(bar_index - 2, bearObTop, bar_index + zoneExtendBars, bearObBot, bgcolor=color.new(color.red, 70), border_color=color.new(color.red, 10), text=zoneLabel("SELL", false, sc, 0, targetRR), text_color=color.white, text_size=size.small)
+        tpLine = line.new(bar_index - 2, sellTp, bar_index + zoneExtendBars, sellTp, color=color.new(color.lime, 0), style=line.style_dashed, width=1)
+        slLine = line.new(bar_index - 2, sellSl, bar_index + zoneExtendBars, sellSl, color=color.new(color.red, 0), style=line.style_dotted, width=1)
+        array.push(sellBoxes, b)
+        array.push(sellInZone, false)
+        array.push(sellScores, sc)
+        array.push(sellTouches, 0)
+        array.push(sellTargetLines, tpLine)
+        array.push(sellStopLines, slLine)
+        if array.size(sellBoxes) > maxZonesPerSide
+            box.delete(array.shift(sellBoxes))
+            array.shift(sellInZone)
+            array.shift(sellScores)
+            array.shift(sellTouches)
+            line.delete(array.shift(sellTargetLines))
+            line.delete(array.shift(sellStopLines))
 
 // ============================================================
 // DASHBOARD
@@ -211,10 +280,10 @@ if showDash and barstate.islast
     table.cell(dash, 1, 1, str.tostring(array.size(sellBoxes)), text_color=color.white, bgcolor=color.gray)
 
     table.cell(dash, 0, 2, "Price In Buy Zone", text_color=color.white, bgcolor=anyBuyInZone ? color.new(color.green, 30) : color.gray)
-    table.cell(dash, 1, 2, anyBuyInZone ? starsText(bestBuyScore) + " - ENTRY OK" : "No", text_color=color.white, bgcolor=anyBuyInZone ? color.new(color.green, 30) : color.gray)
+    table.cell(dash, 1, 2, anyBuyInZone ? qualityText(bestBuyScore) + " - ENTRY OK" : "No", text_color=color.white, bgcolor=anyBuyInZone ? color.new(color.green, 30) : color.gray)
 
     table.cell(dash, 0, 3, "Price In Sell Zone", text_color=color.white, bgcolor=anySellInZone ? color.new(color.red, 30) : color.gray)
-    table.cell(dash, 1, 3, anySellInZone ? starsText(bestSellScore) + " - ENTRY OK" : "No", text_color=color.white, bgcolor=anySellInZone ? color.new(color.red, 30) : color.gray)
+    table.cell(dash, 1, 3, anySellInZone ? qualityText(bestSellScore) + " - ENTRY OK" : "No", text_color=color.white, bgcolor=anySellInZone ? color.new(color.red, 30) : color.gray)
 
 if not showDash and barstate.islast
     table.clear(dash, 0, 0, 1, 3)

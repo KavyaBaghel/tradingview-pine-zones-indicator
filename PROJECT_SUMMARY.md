@@ -6,7 +6,7 @@ TradingView Pine Zones Indicator Suite
 
 ## Description
 
-Built a TradingView Pine Script indicator suite that detects and visualizes buy/sell zones, fair value gaps, breakout/breakdown conditions, tap strength, higher-timeframe zones, and XAUUSD order-block scalping zones. The tools help traders map important chart zones, review market structure, and plan trades with clearer visual context.
+Built a TradingView Pine Script indicator suite that detects and visualizes buy/sell zones, fair value gaps, breakout/breakdown conditions, tap strength, higher-timeframe zones, and XAUUSD order-block scalping zones. The XAUUSD scalper includes an OB-only 80% quality filter and 1:3 RR target/stop planning guides. The tools help traders map important chart zones, review market structure, and plan trades with clearer visual context.
 
 ## Skills
 

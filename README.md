@@ -14,7 +14,7 @@ indicators/smart-money-zones-pro.pine
 
 ### Krishna Simple OB Scalper - XAUUSD
 
-Lightweight XAUUSD-focused order-block scalper. It detects the last opposite-color candle before a displacement candle, scores zone quality using FVG, volume, OB cleanliness, and displacement strength, then marks whether price has tapped a buy or sell zone.
+Lightweight XAUUSD-focused order-block scalper. It detects the last opposite-color candle before a displacement candle, scores OB quality without relying on FVG logic, filters zones below the default 80% quality threshold, then plots a 1:3 risk/reward target and stop guide for accepted buy or sell zones.
 
 ```text
 indicators/krishna-simple-ob-scalper-xauusd.pine
@@ -30,6 +30,8 @@ indicators/krishna-simple-ob-scalper-xauusd.pine
 - Optional breakout and breakdown labels
 - Next-zone target line with RR filtering
 - Dashboard showing active buy/sell zones, FVG count, sweep state, and break status
+- OB-only XAUUSD scalper mode with an 80% default quality filter
+- 1:3 RR target/stop guide lines for accepted OB zones
 
 ## How To Use
 
@@ -54,6 +56,8 @@ This indicator is designed for chart review, liquidity-zone mapping, session ana
 ## Important Note
 
 This is not financial advice and does not guarantee profitable trades. It is a charting and analysis tool. Traders should backtest, forward-test, and use risk management before making trading decisions.
+
+The XAUUSD scalper's 80% setting is an internal OB quality filter, not a promised win rate.
 
 ## Tech Stack
 
